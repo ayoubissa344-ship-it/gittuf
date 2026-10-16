@@ -67,6 +67,16 @@ func PropagateChangesFromUpstreamRepository(downstreamRepo DownstreamRepository,
 			return err
 		}
 
+		if detail.GetUpstreamPath() != "" {
+			upstreamTreeID, err = upstreamRepo.GetPathIDInTree(
+				upstreamTreeID,
+				detail.GetUpstreamPath(),
+			)
+			if err != nil {
+				return err
+			}
+		}
+
 		if !currentPathTreeID.IsZero() && currentPathTreeID.Equal(upstreamTreeID.Bytes()) {
 			// Nothing to do
 			continue

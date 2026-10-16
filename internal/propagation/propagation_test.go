@@ -249,3 +249,107 @@ func TestPropagateChangesUpstreamPathMissing(t *testing.T) {
 	err = PropagateChangesFromUpstreamRepository(downstreamRepo, upstreamRepo, []tuf.PropagationDirective{directive}, false)
 	assert.ErrorIs(t, err, gitinterface.ErrTreeDoesNotHavePath)
 }
+
+func TestPropagateChangesFromUpstreamRepositoryWithUpstreamPathIsIdempotent(t *testing.T) {
+	upstreamRepoLocation := t.TempDir()
+	upstreamRepo := gitinterface.CreateTestGitRepository(t, upstreamRepoLocation, true)
+
+	metadataBlobID, err := upstreamRepo.WriteBlob([]byte("metadata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unrelatedBlobID, err := upstreamRepo.WriteBlob([]byte("unrelated"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upstreamTreeBuilder := gitinterface.NewTreeBuilder(upstreamRepo)
+	upstreamRootTreeID, err := upstreamTreeBuilder.WriteTreeFromEntries([]gitinterface.TreeEntry{
+		gitinterface.NewEntryBlob("metadata/root.json", metadataBlobID),
+		gitinterface.NewEntryBlob("unrelated.txt", unrelatedBlobID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upstreamCommitID, err := upstreamRepo.Commit(
+		upstreamRootTreeID, "refs/heads/main", "Upstream commit\n", false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rsl.NewReferenceEntry("refs/heads/main", upstreamCommitID).Commit(upstreamRepo, false); err != nil {
+		t.Fatal(err)
+	}
+
+	downstreamRepo := gitinterface.CreateTestGitRepository(t, t.TempDir(), true)
+	downstreamTreeBuilder := gitinterface.NewTreeBuilder(downstreamRepo)
+	downstreamRootTreeID, err := downstreamTreeBuilder.WriteTreeFromEntries(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	downstreamCommitID, err := downstreamRepo.Commit(
+		downstreamRootTreeID, "refs/heads/main", "Downstream initial commit\n", false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rsl.NewReferenceEntry("refs/heads/main", downstreamCommitID).Commit(downstreamRepo, false); err != nil {
+		t.Fatal(err)
+	}
+
+	directive := &tufv01.PropagationDirective{
+		UpstreamReference:   "refs/heads/main",
+		UpstreamRepository:  upstreamRepoLocation,
+		UpstreamPath:        "metadata",
+		DownstreamReference: "refs/heads/main",
+		DownstreamPath:      "propagated-metadata",
+	}
+
+	propagate := func() error {
+		return PropagateChangesFromUpstreamRepository(
+			downstreamRepo,
+			upstreamRepo,
+			[]tuf.PropagationDirective{directive},
+			false,
+		)
+	}
+
+	if err := propagate(); err != nil {
+		t.Fatal(err)
+	}
+
+	firstEntry, err := rsl.GetLatestEntry(downstreamRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPropagationEntry, ok := firstEntry.(*rsl.PropagationEntry)
+	if !ok {
+		t.Fatalf("expected propagation entry, got %T", firstEntry)
+	}
+
+	downstreamTreeID, err := downstreamRepo.GetCommitTreeID(firstPropagationEntry.TargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualSubtreeID, err := downstreamRepo.GetPathIDInTree(downstreamTreeID, "propagated-metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedSubtreeID, err := upstreamRepo.GetPathIDInTree(upstreamRootTreeID, "metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, expectedSubtreeID, actualSubtreeID)
+
+	if err := propagate(); err != nil {
+		t.Fatal(err)
+	}
+	secondEntry, err := rsl.GetLatestEntry(downstreamRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, firstPropagationEntry.GetID(), secondEntry.GetID())
+}
